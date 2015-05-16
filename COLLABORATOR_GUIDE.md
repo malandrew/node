@@ -96,7 +96,7 @@ information regarding the change process:
   appropriate.
 
 See the commit log for examples such as
-[this one](https://github.com/iojs/io.js/commit/b636ba8186) if unsure
+[this one](https://github.com/nodejs/io.js/commit/b636ba8186) if unsure
 exactly how to format your commit messages.
 
 Additionally:

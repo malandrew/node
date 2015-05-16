@@ -60,7 +60,7 @@ The [Tracing WG](https://github.com/nodejs/tracing-wg) is driving this effort:
 * async-listener - userland module that will dogfood AsyncWrap as well as provide many often requested debugging features.
 * Tracing
   * Add tracing support for more platforms (LTTng, etc).
-  * [Unify the Tracing endpoint](https://github.com/nodejs/node/issues/729).
+  * [Unify the Tracing endpoint](https://github.com/nodejs/io.js/issues/729).
   * New Chrome Debugger - Google is working on a version of Chrome's debugger that is without Chrome and can be used with Node.js.
 
 ## Ecosystem Automation
