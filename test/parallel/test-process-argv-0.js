@@ -1,3 +1,4 @@
+'use strict';
 var util = require('util');
 var path = require('path');
 var assert = require('assert');
@@ -20,7 +21,7 @@ if (process.argv[2] !== "child") {
   child.stderr.on('data', function(chunk) {
     childErr += chunk;
   });
-  child.on('exit', function () {
+  child.on('exit', function() {
     console.error('CHILD: %s', childErr.trim().split('\n').join('\nCHILD: '));
     assert.equal(childArgv0, process.execPath);
   });
