@@ -4,7 +4,6 @@
 #include "node_file.h"
 #include "node_http_parser.h"
 #include "node_javascript.h"
-#include "node_options.h"
 #include "node_version.h"
 
 #if defined HAVE_PERFCTR
@@ -112,6 +111,18 @@ using v8::V8;
 using v8::Value;
 using v8::kExternalUint32Array;
 
+static bool print_eval = false;
+static bool force_repl = false;
+static bool trace_deprecation = false;
+static bool throw_deprecation = false;
+static bool abort_on_uncaught_exception = false;
+static bool trace_sync_io = false;
+static const char* eval_string = nullptr;
+static unsigned int preload_module_count = 0;
+static const char** preload_modules = nullptr;
+static bool use_debug_agent = false;
+static bool debug_wait_connect = false;
+static int debug_port = 5858;
 static bool v8_is_profiling = false;
 static bool node_is_initialized = false;
 static node_module* modpending;
@@ -119,8 +130,10 @@ static node_module* modlist_builtin;
 static node_module* modlist_linked;
 static node_module* modlist_addon;
 
-// cli options
-NodeOptions node_options;
+#if defined(NODE_HAVE_I18N_SUPPORT)
+// Path to ICU data (for i18n / Intl)
+static const char* icu_data_dir = nullptr;
+#endif
 
 // used by C++ modules as well
 bool no_deprecation = false;
@@ -1253,13 +1266,13 @@ enum encoding ParseEncoding(const char* encoding,
   } else if (strcasecmp(encoding, "hex") == 0) {
     return HEX;
   } else if (strcasecmp(encoding, "raw") == 0) {
-    if (!node_options.no_deprecation) {
+    if (!no_deprecation) {
       fprintf(stderr, "'raw' (array of integers) has been removed. "
                       "Use 'binary'.\n");
     }
     return BINARY;
   } else if (strcasecmp(encoding, "raws") == 0) {
-    if (!node_options.no_deprecation) {
+    if (!no_deprecation) {
       fprintf(stderr, "'raws' encoding has been renamed to 'binary'. "
                       "Please update your code.\n");
     }
@@ -2535,14 +2548,14 @@ static Handle<Object> GetFeatures(Environment* env) {
 
 static void DebugPortGetter(Local<String> property,
                             const PropertyCallbackInfo<Value>& info) {
-  info.GetReturnValue().Set(node_options.debug_port);
+  info.GetReturnValue().Set(debug_port);
 }
 
 
 static void DebugPortSetter(Local<String> property,
                             Local<Value> value,
                             const PropertyCallbackInfo<void>& info) {
-  node_options.debug_port = value->Int32Value();
+  debug_port = value->Int32Value();
 }
 
 
@@ -2776,58 +2789,56 @@ void SetupProcessObject(Environment* env,
                        env->as_external());
 
   // -e, --eval
-  if (node_options.eval_string) {
+  if (eval_string) {
     READONLY_PROPERTY(process,
                       "_eval",
-                      String::NewFromUtf8(env->isolate(),
-                                          node_options.eval_string));
+                      String::NewFromUtf8(env->isolate(), eval_string));
   }
 
   // -p, --print
-  if (node_options.print_eval) {
+  if (print_eval) {
     READONLY_PROPERTY(process, "_print_eval", True(env->isolate()));
   }
 
   // -i, --interactive
-  if (node_options.force_repl) {
+  if (force_repl) {
     READONLY_PROPERTY(process, "_forceRepl", True(env->isolate()));
   }
 
-  if (node_options.preload_module_count) {
-    CHECK(node_options.preload_modules);
+  if (preload_module_count) {
+    CHECK(preload_modules);
     Local<Array> array = Array::New(env->isolate());
-    for (unsigned int i = 0; i < node_options.preload_module_count; ++i) {
-      Local<String> module = String::NewFromUtf8(
-          env->isolate(),
-          node_options.preload_modules[i]);
+    for (unsigned int i = 0; i < preload_module_count; ++i) {
+      Local<String> module = String::NewFromUtf8(env->isolate(),
+                                                 preload_modules[i]);
       array->Set(i, module);
     }
     READONLY_PROPERTY(process,
                       "_preload_modules",
                       array);
 
-    delete[] node_options.preload_modules;
-    node_options.preload_modules = nullptr;
-    node_options.preload_module_count = 0;
+    delete[] preload_modules;
+    preload_modules = nullptr;
+    preload_module_count = 0;
   }
 
   // --no-deprecation
-  if (node_options.no_deprecation) {
+  if (no_deprecation) {
     READONLY_PROPERTY(process, "noDeprecation", True(env->isolate()));
   }
 
   // --throw-deprecation
-  if (node_options.throw_deprecation) {
+  if (throw_deprecation) {
     READONLY_PROPERTY(process, "throwDeprecation", True(env->isolate()));
   }
 
   // --trace-deprecation
-  if (node_options.trace_deprecation) {
+  if (trace_deprecation) {
     READONLY_PROPERTY(process, "traceDeprecation", True(env->isolate()));
   }
 
   // --trace-sync-io
-  if (node_options.trace_sync_io) {
+  if (trace_sync_io) {
     READONLY_PROPERTY(process, "traceSyncIO", True(env->isolate()));
     // Don't env->set_trace_sync_io(true) because it will be enabled
     // after LoadEnvironment() has run.
@@ -3238,6 +3249,7 @@ static void ParseArgs(int* argc,
   delete[] local_preload_modules;
 }
 
+
 // Called from V8 Debug Agent TCP thread.
 static void DispatchMessagesDebugAgentCallback(Environment* env) {
   // TODO(indutny): move async handle to environment
@@ -3250,12 +3262,9 @@ static void StartDebug(Environment* env, bool wait) {
 
   env->debugger_agent()->set_dispatch_handler(
         DispatchMessagesDebugAgentCallback);
-  debugger_running = env->debugger_agent()->Start(node_options.debug_port,
-                                                  wait);
+  debugger_running = env->debugger_agent()->Start(debug_port, wait);
   if (debugger_running == false) {
-    fprintf(stderr,
-            "Starting debugger on port %d failed\n",
-            node_options.debug_port);
+    fprintf(stderr, "Starting debugger on port %d failed\n", debug_port);
     fflush(stderr);
     return;
   }
@@ -3625,8 +3634,8 @@ void Init(int* argc,
   // Parse a few arguments which are specific to Node.
   int v8_argc;
   const char** v8_argv;
-  node_options.ParseArgs(argc, argv, exec_argc, exec_argv, &v8_argc, &v8_argv);
-  no_deprecation = node_options.no_deprecation;
+  ParseArgs(argc, argv, exec_argc, exec_argv, &v8_argc, &v8_argv);
+
   // TODO(bnoordhuis) Intercept --prof arguments and start the CPU profiler
   // manually?  That would give us a little more control over its runtime
   // behavior but it could also interfere with the user's intentions in ways
@@ -3665,14 +3674,14 @@ void Init(int* argc,
     exit(9);
   }
 
-  if (node_options.debug_wait_connect) {
+  if (debug_wait_connect) {
     const char expose_debug_as[] = "--expose_debug_as=v8debug";
     V8::SetFlagsFromString(expose_debug_as, sizeof(expose_debug_as) - 1);
   }
 
   V8::SetArrayBufferAllocator(&ArrayBufferAllocator::the_singleton);
 
-  if (!node_options.use_debug_agent) {
+  if (!use_debug_agent) {
     RegisterDebugSignalHandler();
   }
 
@@ -3885,15 +3894,14 @@ static void StartNodeInstance(void* arg) {
     Environment* env = CreateEnvironment(isolate, context, instance_data);
     Context::Scope context_scope(context);
     if (instance_data->is_main())
-      env->set_using_abort_on_uncaught_exc(
-          node_options.abort_on_uncaught_exception);
+      env->set_using_abort_on_uncaught_exc(abort_on_uncaught_exception);
     // Start debug agent when argv has --debug
     if (instance_data->use_debug_agent())
-      StartDebug(env, node_options.debug_wait_connect);
+      StartDebug(env, debug_wait_connect);
 
     LoadEnvironment(env);
 
-    env->set_trace_sync_io(node_options.trace_sync_io);
+    env->set_trace_sync_io(trace_sync_io);
 
     // Enable debugger
     if (instance_data->use_debug_agent())
@@ -3970,7 +3978,7 @@ int Start(int argc, char** argv) {
                                    const_cast<const char**>(argv),
                                    exec_argc,
                                    exec_argv,
-                                   node_options.use_debug_agent);
+                                   use_debug_agent);
     StartNodeInstance(&instance_data);
     exit_code = instance_data.exit_code();
   }
